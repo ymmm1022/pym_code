@@ -1,0 +1,67 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.so
+
+# Packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.python-version
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE/Editor
+.vscode/
+.idea/
+*.code-workspace
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Logs & runs
+*.log
+logs/
+runs/
+
+# Checkpoints / large artifacts
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.npz
+*.npy
+*.pkl
+
+# Dataset/process artifacts (keep code/configs)
+data/**/raw_data/
+data/**/denoised_data/
+data/**/statistics/
+data/**/*.npz
+data/**/*.pkl
+
+# Project outputs (if exist)
+test_result/
+test_result_color/
+
+# Torchlight build artifacts
+torchlight/**/*.egg-info/
+torchlight/**/build/
+torchlight/**/dist/
+
+# Cache
+.cache/
+**/__pycache__/
+
