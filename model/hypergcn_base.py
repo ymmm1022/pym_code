@@ -253,11 +253,8 @@ class HYPERGC(nn.Module):
     def forward(self, x):
         N, C, T, V = x.size()
 
-        # 1. Virtual Node Appending 
-        h_x = self.hyper_joint
-        h_x = (h_x.T).unsqueeze(1)
-        x = torch.cat([x, h_x.repeat(N, 1, T, 1)], dim=-1)
-        V_ext = V + self.virtual_num 
+        # Use original joints without virtual joints
+        V_ext = V 
         
         # --- Component 1: A_learn (Learnable Biased Prior / Base Term) ---
         H_init = self.PA.cuda(x.get_device()) # (V_ext, V_ext)
@@ -295,17 +292,32 @@ class HYPERGC(nn.Module):
             
             A_sem = self.a_norm(H_sem) # Normalized SSK Matrix (A_sem)
             
-            # ----------------------------------------------------
-            # Topology Fusion (Two-Matrix Fusion: A_learn + ReLU(alpha) * A_sem)
-            # ----------------------------------------------------
-            
-            A_learn_batched = A_learn.unsqueeze(0).repeat(N, 1, 1)
+        # ----------------------------------------------------
+        # Topology Fusion (Two-Matrix Fusion: A_learn + ReLU(alpha) * A_sem)
+        # ----------------------------------------------------
+        
+        if self.hyper:
+            # Ensure A_learn is 2D matrix and expand to batch dimension
+            if A_learn.dim() == 2:
+                A_learn_batched = A_learn.unsqueeze(0).repeat(N, 1, 1)
+            elif A_learn.dim() == 3:
+                # If already 3D, use directly
+                A_learn_batched = A_learn
+            else:
+                # Other cases, try to reshape to 2D
+                A_learn = A_learn.view(-1, A_learn.size(-1))
+                A_learn_batched = A_learn.unsqueeze(0).repeat(N, 1, 1)
             
             A_fused = A_learn_batched + self.relu(self.alpha) * A_sem
-
         else:
             # If hyper=False, only use the learnable prior.
-            A_fused = A_learn.unsqueeze(0).repeat(N, 1, 1)
+            if A_learn.dim() == 2:
+                A_fused = A_learn.unsqueeze(0).repeat(N, 1, 1)
+            elif A_learn.dim() == 3:
+                A_fused = A_learn
+            else:
+                A_learn = A_learn.view(-1, A_learn.size(-1))
+                A_fused = A_learn.unsqueeze(0).repeat(N, 1, 1)
             
         # 3. Hypergraph Convolution Operation
         d_x = self.conv_d(x)
@@ -316,13 +328,11 @@ class HYPERGC(nn.Module):
         y = y.view(N, self.out_channels, T, V_ext)
 
         # 4. Final Output 
-        x = x[..., :self.vertex_nums]
-        y = y[..., :self.vertex_nums]
-
+        # No need to crop virtual joints, output directly
         y = self.bn(y)
         y += self.down(x)
         y = self.relu(y)
-        return y, self.hyper_joint
+        return y, None  # 不再返回hyper_joint
 
 class TemporalConv(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, dilation=1):
@@ -457,9 +467,9 @@ class TCN_GCN_unit(nn.Module):
             self.residual = unit_tcn(in_channels, out_channels, kernel_size=1, stride=stride)
 
     def forward(self, x):
-        y, h_x = self.gcn1(x)
+        y, _ = self.gcn1(x)  # 忽略hyper_joint返回值
         y = self.relu(self.tcn1(y) + self.residual(x))
-        return y, h_x
+        return y, None  # 不再返回hyper_joint
 
 
 class Model(nn.Module):
@@ -515,20 +525,20 @@ class Model(nn.Module):
 
         x = x.view(N * M, self.embedding_channels, T, V)
 
-        x, h_x1 = self.l1(x)
+        x, _ = self.l1(x)
         x1 = x
-        x, h_x2 = self.l2(x)
-        x, h_x3 = self.l3(x + x1)
+        x, _ = self.l2(x)
+        x, _ = self.l3(x + x1)
 
-        x, h_x4 = self.l4(x)
+        x, _ = self.l4(x)
         x4 = x
-        x, h_x5 = self.l5(x)
-        x, h_x6 = self.l6(x + x4)
+        x, _ = self.l5(x)
+        x, _ = self.l6(x + x4)
 
-        x, h_x7 = self.l7(x)
+        x, _ = self.l7(x)
         x7 = x
-        x, h_x8 = self.l8(x)
-        x, h_x9 = self.l9(x + x7)
+        x, _ = self.l8(x)
+        x, _ = self.l9(x + x7)
 
         # N*M,C,T,V
         c_new = x.size(1)
@@ -536,7 +546,7 @@ class Model(nn.Module):
         x = x.mean(3).mean(1)
         x = self.drop_out(x)
 
-        return self.fc(x), [h_x1, h_x2, h_x3, h_x4, h_x5, h_x6, h_x7, h_x8, h_x9]
+        return self.fc(x), []  # 不再返回hyper_joint列表
 
 
 if __name__ == '__main__':

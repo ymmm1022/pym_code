@@ -30,10 +30,10 @@ model_args:
   num_class: 60
   num_point: 25
   num_person: 2
-  hyper_joints: 3
+  hyper_joints: 0
   graph: graph.ntu_rgb_d.Graph
   graph_args:
-    labeling_mode: 'virtual_ensemble'
+    labeling_mode: 'spatial'
 
 #optim
 weight_decay: 0.0004
@@ -43,9 +43,9 @@ step: [110, 120]
 warm_up_epoch: 5
 
 # training
-device: [0]  # -1表示使用CPU
-batch_size: 2
-test_batch_size: 2
+device: [0,1]
+batch_size: 64
+test_batch_size: 64
 num_epoch: 140
 save_epoch: 110
 nesterov: True
