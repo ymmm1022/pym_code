@@ -27,8 +27,8 @@ from tqdm import tqdm
 
 import sys
 import os
-sys.path.append(os.path.join(os.path.dirname(__file__), 'torchlight', 'torchlight'))
-from util import DictAction
+sys.path.append(os.path.join(os.path.dirname(__file__), 'torchlight'))
+from torchlight.util import DictAction
 
 
 # Resource module is Unix/Linux only, skip on Windows
@@ -71,6 +71,9 @@ class DivergenceLoss(nn.Module):
         self.relu = nn.ReLU()
 
     def forward(self, x):
+        if len(x) == 0:
+            return torch.tensor(0.0, device='cuda' if torch.cuda.is_available() else 'cpu')
+        
         V, C = x[0].size()
         loss = 0
 
@@ -425,13 +428,14 @@ class Processor():
 
             # forward
             output = self.model(data)
-            if isinstance(output, tuple):
+            if isinstance(output, tuple) and len(output[1]) > 0:
                 ce_loss = self.loss(output[0], label)
                 h_loss = self.h_loss(output[1])
                 loss = ce_loss + h_loss
                 output = output[0]
             else:
-                loss = self.loss(output, label)
+                ce_loss = self.loss(output[0] if isinstance(output, tuple) else output, label)
+                loss = ce_loss  # Only use classification loss when no hyper_joints
 
             # backward
             self.optimizer.zero_grad()
@@ -441,7 +445,9 @@ class Processor():
             loss_value.append(loss.data.item())
             timer['model'] += self.split_time()
 
-            value, predict_label = torch.max(output.data, 1)
+            # Extract logits from output tuple if needed
+            logits = output[0] if isinstance(output, tuple) else output
+            value, predict_label = torch.max(logits.data, 1)
             acc = torch.mean((predict_label == label.data).float())
             acc_value.append(acc.data.item())
             self.train_writer.add_scalar('acc', acc, self.global_step)
@@ -484,14 +490,13 @@ class Processor():
                     data = data.float().cuda(self.output_device)
                     label = label.long().cuda(self.output_device)
                     output = self.model(data)
-                    if isinstance(output, tuple):
-                        loss = self.loss(output[0], label)
-                        output = output[0]
-                    else:
-                        loss = self.loss(output, label)
-                    score_frag.append(output.cpu())
+                    # Extract logits from output tuple if needed
+                    logits = output[0] if isinstance(output, tuple) else output
+                    loss = self.loss(logits, label)
+                    
+                    score_frag.append(logits.cpu())
                     loss_value.append(loss.data.item())
-                    _, predict_label = torch.max(output.data, 1)
+                    _, predict_label = torch.max(logits.data, 1)
                     step += 1
                 if wrong_file is not None or result_file is not None:
                     predict = list(predict_label.cpu().numpy())

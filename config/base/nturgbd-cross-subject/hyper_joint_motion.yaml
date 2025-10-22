@@ -30,10 +30,10 @@ model_args:
   num_class: 60
   num_point: 25
   num_person: 2
-  hyper_joints: 3
+  hyper_joints: 0
   graph: graph.ntu_rgb_d.Graph
   graph_args:
-    labeling_mode: 'virtual_ensemble'
+    labeling_mode: 'spatial'
 
 #optim
 weight_decay: 0.0004

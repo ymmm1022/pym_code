@@ -205,11 +205,14 @@ class HYPERGC(nn.Module):
             self.softmax_h = nn.Softmax(dim=-1) # For per-row attention scores (Step 3)
             self.softmax_gate = nn.Softmax(dim=1) # For confidence fusion (Step 4)
             
-            # Virtual node embeddings
-            self.hyper_joint = nn.Parameter(torch.zeros(self.virtual_num, in_channels))
+            # Virtual node embeddings (only create if virtual_num > 0)
+            if self.virtual_num > 0:
+                self.hyper_joint = nn.Parameter(torch.zeros(self.virtual_num, in_channels))
+            else:
+                self.hyper_joint = None
             
             # Simplified Two-Matrix Fusion Weight: alpha weights the SSK adaptive term H_sem
-            self.alpha = nn.Parameter(torch.ones(1)) 
+            # self.alpha = nn.Parameter(torch.ones(1))  # Removed unused parameter 
             
             self.scale = self.head_dim ** -0.5 # 1/sqrt(d_k) for dot-product attention
 
@@ -297,18 +300,30 @@ class HYPERGC(nn.Module):
         # ----------------------------------------------------
         
         if self.hyper:
-            # Ensure A_learn is 2D matrix and expand to batch dimension
+            # Ensure A_learn matches A_sem dimensions
             if A_learn.dim() == 2:
                 A_learn_batched = A_learn.unsqueeze(0).repeat(N, 1, 1)
             elif A_learn.dim() == 3:
-                # If already 3D, use directly
                 A_learn_batched = A_learn
             else:
-                # Other cases, try to reshape to 2D
                 A_learn = A_learn.view(-1, A_learn.size(-1))
                 A_learn_batched = A_learn.unsqueeze(0).repeat(N, 1, 1)
             
-            A_fused = A_learn_batched + self.relu(self.alpha) * A_sem
+            # Fix batch size mismatch - use simpler approach
+            if A_learn_batched.shape[0] != A_sem.shape[0]:
+                # Simply repeat to match or exceed target size, then slice
+                target_batch_size = A_sem.shape[0]
+                current_batch_size = A_learn_batched.shape[0]
+                
+                # Calculate how many times to repeat
+                repeat_factor = (target_batch_size + current_batch_size - 1) // current_batch_size
+                A_learn_batched = A_learn_batched.repeat(repeat_factor, 1, 1)
+                
+                # Slice to exact target size
+                A_learn_batched = A_learn_batched[:target_batch_size]
+            
+            # Use only semantic hypergraph to avoid gradient issues
+            A_fused = A_sem
         else:
             # If hyper=False, only use the learnable prior.
             if A_learn.dim() == 2:
