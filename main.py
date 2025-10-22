@@ -182,6 +182,11 @@ def get_parser():
         default=dict(),
         help='the arguments of model')
     parser.add_argument(
+        '--pas-config',
+        action=DictAction,
+        default=dict(),
+        help='PAS (Prior-Aware Selection) configuration for adaptive hypergraph')
+    parser.add_argument(
         '--weights',
         default=None,
         help='the weights for network initialization')
@@ -396,6 +401,24 @@ class Processor():
         if self.arg.print_log:
             with open('{}/log.txt'.format(self.arg.work_dir), 'a') as f:
                 print(str, file=f)
+    
+    def print_pas_status(self, epoch):
+        """打印PAS状态信息"""
+        if epoch <= 30:
+            stage = "训练初期"
+            pas_status = "启用PAS (保守策略)"
+            strategy = "主要依赖结构先验，较少信任语义超图"
+        elif epoch <= 80:
+            stage = "训练中期"
+            pas_status = "启用PAS (平衡策略)"
+            strategy = "平衡语义超图和结构先验"
+        else:
+            stage = "训练后期"
+            pas_status = "禁用PAS (激进策略)"
+            strategy = "完全信任语义超图"
+        
+        self.print_log(f'\tPAS状态 [{stage}]: {pas_status}')
+        self.print_log(f'\t策略: {strategy}')
 
     def record_time(self):
         self.cur_time = time.time()
@@ -427,7 +450,7 @@ class Processor():
             timer['dataloader'] += self.split_time()
 
             # forward
-            output = self.model(data)
+            output = self.model(data, epoch=epoch)
             if isinstance(output, tuple) and len(output[1]) > 0:
                 ce_loss = self.loss(output[0], label)
                 h_loss = self.h_loss(output[1])
@@ -467,6 +490,9 @@ class Processor():
         self.print_log(
             '\tMean training loss: {:.4f}. Mean training acc: {:.2f}%.'.format(np.mean(loss_value), np.mean(acc_value)*100))
         self.print_log('\tTime consumption: [Data]{dataloader}, [Network]{model}'.format(**proportion))
+        
+        # 打印PAS状态信息
+        self.print_pas_status(epoch + 1)
 
         if save_model:
             state_dict = self.model.state_dict()
@@ -489,7 +515,7 @@ class Processor():
                 with torch.no_grad():
                     data = data.float().cuda(self.output_device)
                     label = label.long().cuda(self.output_device)
-                    output = self.model(data)
+                    output = self.model(data, epoch=epoch)
                     # Extract logits from output tuple if needed
                     logits = output[0] if isinstance(output, tuple) else output
                     loss = self.loss(logits, label)
@@ -607,7 +633,7 @@ if __name__ == '__main__':
     # load arg form config file
     p = parser.parse_args()
     if p.config is not None:
-        with open(p.config, 'r') as f:
+        with open(p.config, 'r', encoding='utf-8') as f:
             default_arg = yaml.safe_load(f)
         key = vars(p).keys()
         for k in default_arg.keys():

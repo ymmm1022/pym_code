@@ -219,13 +219,7 @@ class HYPERGC(nn.Module):
         self.PA = nn.Parameter(torch.from_numpy(A.astype(np.float32)), requires_grad=True)
         self.edge_importance = nn.Parameter(torch.ones(A.shape))
         # A_prior: 结构锚定的先验图 (用于 PAS)
-        if A_prior is not None:
-            if isinstance(A_prior, torch.Tensor):
-                self.A_prior = A_prior.float()  # 如果已经是Tensor，确保是float32
-            else:
-                self.A_prior = torch.from_numpy(A_prior.astype(np.float32))  # NumPy数组转Tensor
-        else:
-            self.A_prior = None
+        self.A_prior = torch.from_numpy(A_prior.astype(np.float32)) if (A_prior is not None) else None
 
         # --- Conv Transform and Residual ---
         self.conv_d = nn.Conv2d(in_channels, out_channels, kernel_size=1)
@@ -245,42 +239,6 @@ class HYPERGC(nn.Module):
         bn_init(self.bn, 1e-6)
 
     # -----------------------------
-    # PAS配置获取方法
-    # -----------------------------
-    def get_pas_config(self, epoch):
-        """
-        基于epoch的PAS控制策略
-        Args:
-            epoch: 当前训练epoch
-        Returns:
-            dict: PAS配置参数
-        """
-        if epoch <= 30:
-            # 训练初期 (Epochs 1-30): 启用PAS，保守策略
-            return {
-                'use_pas': True,
-                'conf_threshold': 0.15,  # 较低阈值，更容易触发回退
-                'sem_weight': 0.3,       # 较少信任语义超图
-                'prior_weight': 0.7      # 更多依赖结构先验
-            }
-        elif epoch <= 80:
-            # 训练中期 (Epochs 31-80): 启用PAS，平衡策略
-            return {
-                'use_pas': True,
-                'conf_threshold': 0.25,   # 标准阈值
-                'sem_weight': 0.6,       # 逐渐增加对语义超图的信任
-                'prior_weight': 0.4      # 减少对结构先验的依赖
-            }
-        else:
-            # 训练后期 (Epochs 81-140): 禁用PAS，激进策略
-            return {
-                'use_pas': False,        # 完全禁用PAS
-                'conf_threshold': 0.25,  # 保持阈值（虽然不会使用）
-                'sem_weight': 1.0,       # 完全信任语义超图
-                'prior_weight': 0.0      # 不再使用结构先验
-            }
-
-    # -----------------------------
     # 归一化工具 (行和为1)
     # -----------------------------
     def a_norm(self, A):
@@ -291,21 +249,12 @@ class HYPERGC(nn.Module):
     # -----------------------------
     # 前向传播
     # -----------------------------
-    def forward(self, x, use_pas_override=None, blend_sem_weight=None, blend_prior_weight=None, epoch=None):
+    def forward(self, x, use_pas_override=None, blend_sem_weight=None, blend_prior_weight=None):
         N, C, T, V = x.size()
         device = x.device
         
-        # 1. 基于epoch的动态PAS控制策略
-        if epoch is not None:
-            pas_config = self.get_pas_config(epoch)
-            pas_active = pas_config['use_pas']
-            blend_sem_weight = pas_config['sem_weight']
-            blend_prior_weight = pas_config['prior_weight']
-            conf_threshold = pas_config['conf_threshold']
-        else:
-            # 兼容原有接口
-            pas_active = self.use_pas if use_pas_override is None else use_pas_override
-            conf_threshold = self.conf_threshold
+        # 1. 动态 PAS 状态决定 (使用局部变量，不修改 self.use_pas)
+        pas_active = self.use_pas if use_pas_override is None else use_pas_override
 
         # 2. Learnable Prior (A_learn) - 可学习的物理拓扑
         A_base = (self.edge_importance * self.PA.to(device))
@@ -352,12 +301,12 @@ class HYPERGC(nn.Module):
                 sem_weight = blend_sem_weight if blend_sem_weight is not None else 0.8
                 prior_weight = blend_prior_weight if blend_prior_weight is not None else 0.2
 
-                if conf_value < conf_threshold:
+                if conf_value < self.conf_threshold:
                     # Fallback: 置信度低，完全替换为结构锚定 A_prior
                     A_sem = A_prior_norm * 1.0 + 0.0 * A_sem
                 else:
                     # Soft Blend: 使用动态/固定权重进行混合
-                    A_sem = blend_sem_weight * A_sem + blend_prior_weight * A_prior_norm
+                    A_sem = sem_weight * A_sem + prior_weight * A_prior_norm
 
         # --- 3. Topology Fusion ---
         # A_fused = A_learn + ReLU(alpha) * A_sem
@@ -500,9 +449,9 @@ class unit_tcn(nn.Module):
 
 
 class TCN_GCN_unit(nn.Module):
-    def __init__(self, in_channels, out_channels, num_point, hyper_joints, A, stride=1, residual=True, kernel_size=5, dilations=[1, 2], hyper=True, A_prior=None):
+    def __init__(self, in_channels, out_channels, num_point, hyper_joints, A, stride=1, residual=True, kernel_size=5, dilations=[1, 2], hyper=True):
         super(TCN_GCN_unit, self).__init__()
-        self.gcn1 = HYPERGC(in_channels, out_channels, num_point, hyper_joints, A, A_prior=A_prior, hyper=hyper)
+        self.gcn1 = HYPERGC(in_channels, out_channels, num_point, hyper_joints, A, hyper=hyper)
         self.tcn1 = MultiScale_TemporalConv(out_channels, out_channels, kernel_size=kernel_size, stride=stride, dilations=dilations,
                                         residual=False)
         self.relu = nn.ReLU(inplace=True)
@@ -515,8 +464,8 @@ class TCN_GCN_unit(nn.Module):
         else:
             self.residual = unit_tcn(in_channels, out_channels, kernel_size=1, stride=stride)
 
-    def forward(self, x, epoch=None):
-        y, _ = self.gcn1(x, epoch=epoch)  # 传递epoch参数
+    def forward(self, x):
+        y, _ = self.gcn1(x)  # 忽略hyper_joint返回值
         y = self.relu(self.tcn1(y) + self.residual(x))
         return y, None  # 不再返回hyper_joint
 
@@ -533,7 +482,6 @@ class Model(nn.Module):
             self.graph = Graph(hyper_joints, **graph_args)
 
         A = self.graph.A
-        A_prior = self.graph.A_prior  # 获取预定义超图先验
         self.num_class = num_class
         self.num_point = num_point
         self.embedding_channels = 128
@@ -543,15 +491,15 @@ class Model(nn.Module):
         self.pos_embedding = nn.Parameter(torch.randn(1, self.num_point, self.embedding_channels))
         self.tanh = nn.Tanh()
 
-        self.l1 = TCN_GCN_unit(self.embedding_channels, self.embedding_channels, num_point, hyper_joints, A, A_prior=A_prior)
-        self.l2 = TCN_GCN_unit(self.embedding_channels, self.embedding_channels, num_point, hyper_joints, A, A_prior=A_prior)
-        self.l3 = TCN_GCN_unit(self.embedding_channels, self.embedding_channels, num_point, hyper_joints, A, A_prior=A_prior)
-        self.l4 = TCN_GCN_unit(self.embedding_channels, self.embedding_channels * 2, num_point, hyper_joints, A, stride=2, A_prior=A_prior)
-        self.l5 = TCN_GCN_unit(self.embedding_channels * 2, self.embedding_channels * 2, num_point, hyper_joints, A, A_prior=A_prior)
-        self.l6 = TCN_GCN_unit(self.embedding_channels * 2, self.embedding_channels * 2, num_point, hyper_joints, A, A_prior=A_prior)
-        self.l7 = TCN_GCN_unit(self.embedding_channels * 2, self.embedding_channels * 2, num_point, hyper_joints, A, stride=2, A_prior=A_prior)
-        self.l8 = TCN_GCN_unit(self.embedding_channels * 2, self.embedding_channels * 2, num_point, hyper_joints, A, A_prior=A_prior)
-        self.l9 = TCN_GCN_unit(self.embedding_channels * 2, self.embedding_channels * 2, num_point, hyper_joints, A, A_prior=A_prior)
+        self.l1 = TCN_GCN_unit(self.embedding_channels, self.embedding_channels, num_point, hyper_joints, A)
+        self.l2 = TCN_GCN_unit(self.embedding_channels, self.embedding_channels, num_point, hyper_joints, A)
+        self.l3 = TCN_GCN_unit(self.embedding_channels, self.embedding_channels, num_point, hyper_joints, A)
+        self.l4 = TCN_GCN_unit(self.embedding_channels, self.embedding_channels * 2, num_point, hyper_joints, A, stride=2)
+        self.l5 = TCN_GCN_unit(self.embedding_channels * 2, self.embedding_channels * 2, num_point, hyper_joints, A)
+        self.l6 = TCN_GCN_unit(self.embedding_channels * 2, self.embedding_channels * 2, num_point, hyper_joints, A)
+        self.l7 = TCN_GCN_unit(self.embedding_channels * 2, self.embedding_channels * 2, num_point, hyper_joints, A, stride=2)
+        self.l8 = TCN_GCN_unit(self.embedding_channels * 2, self.embedding_channels * 2, num_point, hyper_joints, A)
+        self.l9 = TCN_GCN_unit(self.embedding_channels * 2, self.embedding_channels * 2, num_point, hyper_joints, A)
         self.fc = nn.Linear(self.embedding_channels * 2, self.num_class)
 
         nn.init.normal_(self.fc.weight, 0, math.sqrt(2. / num_class))
@@ -561,7 +509,7 @@ class Model(nn.Module):
         else:
             self.drop_out = lambda x: x
 
-    def forward(self, x, epoch=None):
+    def forward(self, x):
         N, C, T, V, M = x.size()
         x = x.permute(0, 4, 2, 3, 1).contiguous()
         x = self.to_joint_embedding(x)
@@ -575,21 +523,20 @@ class Model(nn.Module):
 
         x = x.view(N * M, self.embedding_channels, T, V)
 
-        # 传递epoch参数到所有TCN_GCN_unit层
-        x, _ = self.l1(x, epoch=epoch)
+        x, _ = self.l1(x)
         x1 = x
-        x, _ = self.l2(x, epoch=epoch)
-        x, _ = self.l3(x + x1, epoch=epoch)
+        x, _ = self.l2(x)
+        x, _ = self.l3(x + x1)
 
-        x, _ = self.l4(x, epoch=epoch)
+        x, _ = self.l4(x)
         x4 = x
-        x, _ = self.l5(x, epoch=epoch)
-        x, _ = self.l6(x + x4, epoch=epoch)
+        x, _ = self.l5(x)
+        x, _ = self.l6(x + x4)
 
-        x, _ = self.l7(x, epoch=epoch)
+        x, _ = self.l7(x)
         x7 = x
-        x, _ = self.l8(x, epoch=epoch)
-        x, _ = self.l9(x + x7, epoch=epoch)
+        x, _ = self.l8(x)
+        x, _ = self.l9(x + x7)
 
         # N*M,C,T,V
         c_new = x.size(1)

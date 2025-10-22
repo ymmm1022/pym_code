@@ -3,7 +3,7 @@ work_dir: ./work_dir/ntu60/xsub/joint
 # feeder
 feeder: feeders.feeder_ntu.Feeder
 train_feeder_args:
-  data_path: E:/pymprojects/Hyper-GCN-main/Hyper-GCN-main/data/ntu/NTU60_CS.npz
+  data_path: E:\pymprojects\data\ntu\NTU60_CS.npz
   split: train
   debug: False
   random_choose: False
@@ -16,7 +16,7 @@ train_feeder_args:
   bone: False
 
 test_feeder_args:
-  data_path: E:/pymprojects/Hyper-GCN-main/Hyper-GCN-main/data/ntu/NTU60_CS.npz
+  data_path: E:\pymprojects\data\ntu\NTU60_CS.npz
   split: test
   window_size: 64
   p_interval: [0.95]
@@ -34,6 +34,18 @@ model_args:
   graph: graph.ntu_rgb_d.Graph
   graph_args:
     labeling_mode: 'spatial'
+    use_hyper_prior: true  # 启用预定义超图先验
+
+# PAS配置参数 (独立于model_args)
+pas_config:
+  early_epochs: 30        # 训练初期epoch数
+  mid_epochs: 80          # 训练中期epoch数
+  early_conf_threshold: 0.15  # 初期置信度阈值
+  mid_conf_threshold: 0.25    # 中期置信度阈值
+  early_sem_weight: 0.3       # 初期语义权重
+  early_prior_weight: 0.7    # 初期先验权重
+  mid_sem_weight: 0.6         # 中期语义权重
+  mid_prior_weight: 0.4     # 中期先验权重
 
 #optim
 weight_decay: 0.0004
@@ -43,9 +55,9 @@ step: [110, 120]
 warm_up_epoch: 5
 
 # training
-device: [0,1]
-batch_size: 64
-test_batch_size: 64
+device: [0]
+batch_size: 2
+test_batch_size: 2
 num_epoch: 140
 save_epoch: 110
 nesterov: True

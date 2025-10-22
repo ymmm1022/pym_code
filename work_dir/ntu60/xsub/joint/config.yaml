@@ -15,8 +15,9 @@ model: model.hypergcn_base.Model
 model_args:
   graph: graph.ntu_rgb_d.Graph
   graph_args:
-    labeling_mode: virtual_ensemble
-  hyper_joints: 3
+    labeling_mode: spatial
+    use_hyper_prior: true
+  hyper_joints: 0
   num_class: 60
   num_person: 2
   num_point: 25
@@ -25,6 +26,15 @@ nesterov: true
 num_epoch: 140
 num_worker: 4
 optimizer: SGD
+pas_config:
+  early_conf_threshold: 0.15
+  early_epochs: 30
+  early_prior_weight: 0.7
+  early_sem_weight: 0.3
+  mid_conf_threshold: 0.25
+  mid_epochs: 80
+  mid_prior_weight: 0.4
+  mid_sem_weight: 0.6
 phase: train
 print_log: true
 save_epoch: 110
@@ -41,7 +51,7 @@ step:
 test_batch_size: 2
 test_feeder_args:
   bone: false
-  data_path: E:/pymprojects/Hyper-GCN-main/Hyper-GCN-main/data/ntu/NTU60_CS.npz
+  data_path: E:\pymprojects\data\ntu\NTU60_CS.npz
   debug: false
   p_interval:
   - 0.95
@@ -50,7 +60,7 @@ test_feeder_args:
   window_size: 64
 train_feeder_args:
   bone: false
-  data_path: E:/pymprojects/Hyper-GCN-main/Hyper-GCN-main/data/ntu/NTU60_CS.npz
+  data_path: E:\pymprojects\data\ntu\NTU60_CS.npz
   debug: false
   p_interval:
   - 0.5
