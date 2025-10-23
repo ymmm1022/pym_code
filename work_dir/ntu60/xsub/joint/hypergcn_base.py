@@ -49,122 +49,95 @@ def weights_init(m):
         if hasattr(m, 'bias') and m.bias is not None:
             m.bias.data.fill_(0)
 
-# class HYPERGC(nn.Module):
-#     def __init__(self, in_channels, out_channels, vertex_nums, virtual_num, A, hyper=True, num_subset=8, rel_reduction=4):
-#         super(HYPERGC, self).__init__()
-#         self.in_channels = in_channels
-#         self.out_channels = out_channels
-#         self.vertex_nums = vertex_nums
-#         self.virtual_num = virtual_num
-#         self.rel_reduction = rel_reduction
-#         self.num_subset = num_subset
-#         self.hyper = hyper
-#         mid_in_channels = in_channels // num_subset
-#         mid_out_channels = out_channels // num_subset
-#         self.mid_in_channels = mid_in_channels
-#         self.mid_out_channels = mid_out_channels
+class JointBoneEmbedding(nn.Module):
+    """
+    Joint + Bone 特征融合模块（优化版）
+    ✅ 面向 NTU-RGBD 数据集的高效实现
+    - 张量化骨骼计算（无循环）
+    - Parent-based Bone 定义（J_i - J_parent(i)）
+    - LeakyReLU 激活 + Kaiming 初始化
+    """
+    def __init__(self, embed_dim=64):
+        super(JointBoneEmbedding, self).__init__()
 
-#         if self.hyper:
-#             # if in_channels == 3 or in_channels == 9:
-#             #     self.hidden_channels = 8
-#             # else:
-#             self.hidden_channels = mid_in_channels // rel_reduction
-#             self.to_V = nn.Conv1d(in_channels, num_subset * self.hidden_channels, kernel_size=1, groups=num_subset)
-#             self.to_W = nn.Sequential(
-#                 nn.Conv1d(in_channels, num_subset * self.hidden_channels, kernel_size=1, groups=num_subset),
-#                 nn.LeakyReLU(),
-#                 nn.Conv1d(num_subset * self.hidden_channels, num_subset, kernel_size=1),
-#                 nn.Tanh()
-#             )
-#             self.hyper_joint = nn.Parameter(torch.zeros(self.virtual_num, in_channels))
-#             self.alpha = nn.Parameter(torch.ones(1))
-#             self.softmax = nn.Softmax(dim=-1)
+        # -------------------------------
+        # NTU RGB+D 骨架的父节点定义 (index 从 0 开始)
+        # 每个节点 i 的父节点 parent[i] = j 表示骨骼方向 J_i - J_j
+        # 参考 2s-AGCN / CTR-GCN 标准拓扑
+        # 节点 0-24 对应人体25个关节
+        # -------------------------------
+        parent_index = [
+            1, 21, 21, 3, 21, 5, 6, 7, 21, 9, 10, 11, 
+            1, 13, 14, 15, 1, 17, 18, 19, 2, 8, 8, 12, 12
+        ]
+        self.parent = torch.tensor(parent_index, dtype=torch.long) - 1  # 转成 0-based 索引
 
-#         self.conv_d = nn.Conv2d(in_channels, out_channels, kernel_size=1, groups=num_subset)
-#         self.PA = nn.Parameter(torch.from_numpy(A.astype(np.float32)), requires_grad=False)
-#         self.edge_importance = nn.Parameter(torch.ones(A.shape))
+        # -------------------------------
+        # 嵌入层：Joint + Bone → 投影到 embed_dim
+        # -------------------------------
+        self.to_embed = nn.Sequential(
+            nn.Conv2d(6, embed_dim, kernel_size=1),
+            nn.BatchNorm2d(embed_dim),
+            nn.LeakyReLU(0.1)
+        )
 
-#         if in_channels != out_channels:
-#             self.down = nn.Sequential(
-#                 nn.Conv2d(in_channels, out_channels, 1),
-#                 nn.BatchNorm2d(out_channels)
-#             )
-#         else:
-#             self.down = lambda x: x
-#         self.bn = nn.BatchNorm2d(out_channels)
-#         self.relu = nn.ReLU()
+        self.init_weights()
 
-#         for m in self.modules():
-#             if isinstance(m, nn.Conv2d):
-#                 conv_init(m)
-#             elif isinstance(m, nn.BatchNorm2d):
-#                 bn_init(m, 1)
-#         bn_init(self.bn, 1e-6)
-#         if self.hyper:
-#             conv_init(self.to_V)
-#             conv_init(self.to_W[0])
-#             conv_init(self.to_W[2])
-#         conv_init(self.conv_d)
+    # -------------------------------
+    # 初始化函数
+    # -------------------------------
+    def init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, nonlinearity='leaky_relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
 
-#     def hyper_norm(self, H, W):
-#         w = torch.diag_embed(W)
-#         norm_w = torch.norm(H, 1, dim=2, keepdim=True) + 1e-8
-#         w_ = w / norm_w
+    # -------------------------------
+    # 计算骨骼特征 (张量化)
+    # -------------------------------
+    def compute_bone_feature(self, J):
+        """
+        Args:
+            J: (N, 3, T, V)
+        Returns:
+            B: (N, 3, T, V)  -> 每个节点对应其骨骼向量
+        """
+        device = J.device
+        parent = self.parent.to(device)  # shape: [V]
 
-#         H_w = H @ w
-#         norm_v = torch.norm(H_w, 1, dim=3, keepdim=True) + 1e-8
-#         h_ = H_w / norm_v
-#         A = h_ @ w_ @ H.transpose(3, 2)
-#         return A
+        # 通过 parent 索引实现批量张量减法 (无循环)
+        J_parent = J[:, :, :, parent]  # (N, 3, T, V)
+        B = J - J_parent               # bone vector J_i - J_parent(i)
 
-#     def a_norm(self, A):
-#         d_r = torch.norm(A, 1, dim=2, keepdim=True) + 1e-8
-#         return A / d_r
+        # 对骨骼方向归一化（保持方向信息，消除尺度）
+        B = F.normalize(B, dim=1)
+        return B
 
-#     def forward(self, x):
-#         N, C, T, V = x.size()
+    # -------------------------------
+    # 前向传播
+    # -------------------------------
+    def forward(self, J_raw):
+        """
+        Args:
+            J_raw: (N, 3, T, V)
+        Returns:
+            X_embed: (N, embed_dim, T, V)
+        """
+        # Step 1: 计算骨骼方向向量
+        B_node = self.compute_bone_feature(J_raw)
 
-#         h_x = self.hyper_joint
-#         h_x = (h_x.T).unsqueeze(1)
-#         x = torch.cat([x, h_x.repeat(N, 1, T, 1)], dim=-1)
-#         V += self.virtual_num
-#         A = self.PA.cuda(x.get_device())
-#         A = self.edge_importance * A
-#         A = self.a_norm(A)
+        # Step 2: 拼接关节与骨骼特征 [3+3=6通道]
+        X = torch.cat([J_raw, B_node], dim=1)  # (N, 6, T, V)
 
-#         if self.hyper:
-#             t_x = x.mean(2)
+        # Step 3: 映射到嵌入空间
+        X_embed = self.to_embed(X)  # (N, embed_dim, T, V)
 
-#             v_x = self.to_V(t_x)
+        return X_embed
 
-#             dis_v_x = v_x.view(N, self.num_subset, self.hidden_channels, V)
-#             dis_v_x = dis_v_x.permute(0, 1, 3, 2).contiguous()
-#             distance_x = torch.cdist(dis_v_x, dis_v_x)
-#             H = torch.zeros_like(distance_x)
-
-#             topk_v, topk_indices = torch.topk(distance_x, 9, largest=False)
-#             topk_v = self.softmax(-topk_v)
-#             H = torch.scatter(H, 3, topk_indices, topk_v)
-
-#             W = self.to_W(t_x)
-
-#             H = self.hyper_norm(H, W)
-#             alpha = self.alpha
-#             alpha = self.relu(alpha)
-#             A = A + alpha * H
-
-#         d_x = self.conv_d(x)
-#         d_x = d_x.view(N, self.num_subset, self.mid_out_channels, T, V)
-#         y = torch.einsum('nkuv,nkctv->nkctu', A, d_x).contiguous()
-#         y = y.view(N, self.out_channels, T, V)
-
-#         x = x[..., :self.vertex_nums]
-#         y = y[..., :self.vertex_nums]
-
-#         y = self.bn(y)
-#         y += self.down(x)
-#         y = self.relu(y)
-#         return y, self.hyper_joint
 class HYPERGC(nn.Module):
     """
     SSK + PAS Hypergraph Convolution Module
@@ -234,7 +207,7 @@ class HYPERGC(nn.Module):
         else:
             self.down = lambda x: x
         self.bn = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)
         
         # 初始化
         for m in self.modules():
@@ -309,6 +282,18 @@ class HYPERGC(nn.Module):
 
         # 2. Learnable Prior (A_learn) - 可学习的物理拓扑
         A_base = (self.edge_importance * self.PA.to(device))
+        
+        # 确保A_base是2D张量
+        if A_base.dim() == 1:
+            # 如果是1D，尝试reshape为2D
+            A_base = A_base.view(int(A_base.size(0)**0.5), -1)
+        elif A_base.dim() == 3:
+            # 如果是3D，取第一个矩阵 (假设是ensemble的情况)
+            A_base = A_base[0]  # 取第一个25x25矩阵
+        elif A_base.dim() > 3:
+            # 如果是更高维，取前两维
+            A_base = A_base.view(A_base.size(0), A_base.size(1))
+        
         # A_learn: (N, V, V)
         A_learn = self.a_norm(A_base.unsqueeze(0).repeat(N, 1, 1))
 
@@ -435,7 +420,7 @@ class MultiScale_TemporalConv(nn.Module):
                         kernel_size=1,
                         padding=0),
                     nn.BatchNorm2d(branch_channels),
-                    nn.ReLU(inplace=True),
+                    nn.ReLU(inplace=False),
                     TemporalConv(
                         branch_channels,
                         branch_channels,
@@ -449,7 +434,7 @@ class MultiScale_TemporalConv(nn.Module):
         self.branches.append(nn.Sequential(
             nn.Conv2d(in_channels, branch_channels, kernel_size=1, padding=0),
             nn.BatchNorm2d(branch_channels),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
             nn.MaxPool2d(kernel_size=(3, 1), stride=(stride, 1), padding=(1, 0)),
             nn.BatchNorm2d(branch_channels),  # 为什么还要加bn
         ))
@@ -490,7 +475,7 @@ class unit_tcn(nn.Module):
                               stride=(stride, 1), padding_mode='replicate')
 
         self.bn = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)
         conv_init(self.conv)
         bn_init(self.bn, 1)
 
@@ -505,7 +490,7 @@ class TCN_GCN_unit(nn.Module):
         self.gcn1 = HYPERGC(in_channels, out_channels, num_point, hyper_joints, A, A_prior=A_prior, hyper=hyper)
         self.tcn1 = MultiScale_TemporalConv(out_channels, out_channels, kernel_size=kernel_size, stride=stride, dilations=dilations,
                                         residual=False)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)
         if not residual:
             self.residual = lambda x: 0
 
@@ -539,7 +524,7 @@ class Model(nn.Module):
         self.embedding_channels = 128
 
         self.data_bn = nn.BatchNorm1d(num_person * self.embedding_channels * num_point)
-        self.to_joint_embedding = nn.Linear(in_channels, self.embedding_channels)
+        self.joint_bone_embedding = JointBoneEmbedding(embed_dim=self.embedding_channels)
         self.pos_embedding = nn.Parameter(torch.randn(1, self.num_point, self.embedding_channels))
         self.tanh = nn.Tanh()
 
@@ -564,7 +549,9 @@ class Model(nn.Module):
     def forward(self, x, epoch=None):
         N, C, T, V, M = x.size()
         x = x.permute(0, 4, 2, 3, 1).contiguous()
-        x = self.to_joint_embedding(x)
+        x = x.view(N * M, T, V, C).permute(0, 3, 1, 2).contiguous()  # (N*M, 3, T, V)
+        x = self.joint_bone_embedding(x) 
+        x = self.data_bn(x)
         x += self.pos_embedding[:, :self.num_point]
         x = self.tanh(x)
         x = x.permute(0, 1, 3, 4, 2).contiguous()
